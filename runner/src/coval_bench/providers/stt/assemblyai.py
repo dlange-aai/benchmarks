@@ -3,7 +3,8 @@
 
 """AssemblyAI real-time STT provider (v3 streaming API).
 
-Models: universal-streaming, universal-streaming-multilingual, universal-N.M-pro
+Models: universal-streaming, universal-streaming-multilingual, universal-N.M-pro,
+assemblyai-stt-3-7-realtime-agent
 Wire protocol: WebSocket, wss://streaming.assemblyai.com/v3/ws
 Auth: Authorization: <key>
 Close: {"type": "Terminate"}
@@ -47,12 +48,25 @@ _END_OF_TURN_CONFIDENCE_THRESHOLD = 1.0
 # https://www.assemblyai.com/docs/streaming/prompting-and-keyterms
 _PRO_EXTRA_PARAMS: dict[str, str] = {"mode": "min_latency"}
 
+# Realtime-agent models: the registry id is the API's speech_model verbatim, and
+# mode=manual is the only extra param. In manual mode the model never ends a turn on
+# its own; the ForceEndpoint we send at speech-end closes the turn (TTFS parity).
+_AGENT_MODELS: dict[str, dict[str, str]] = {
+    "assemblyai-stt-3-7-realtime-agent": {"mode": "manual"},
+}
+
 
 def _is_pro(model: str) -> bool:
     return _PRO_MODEL.match(model) is not None
 
 
+def _is_agent(model: str) -> bool:
+    return model in _AGENT_MODELS
+
+
 def _speech_model(model: str) -> str:
+    if _is_agent(model):
+        return model
     return _SPEECH_MODEL_MAP.get(model) or model.replace(".", "-")
 
 
@@ -62,13 +76,13 @@ class AssemblyAIProvider(WebSocketSTTProvider):
     _SAMPLE_RATE = 16000
 
     def _model_supported(self, model: str) -> bool:
-        return model in _SPEECH_MODEL_MAP or _is_pro(model)
+        return model in _SPEECH_MODEL_MAP or _is_pro(model) or _is_agent(model)
 
     def __init__(self, settings: Settings, model: str = "universal-streaming") -> None:
         if not self._model_supported(model):
             raise ValueError(
                 f"Invalid AssemblyAI model {model!r}. "
-                f"Valid: {sorted(_SPEECH_MODEL_MAP)} or universal-N.M-pro"
+                f"Valid: {sorted(_SPEECH_MODEL_MAP | _AGENT_MODELS)} or universal-N.M-pro"
             )
         super().__init__(settings, model)
         self._api_key = self._require_secret("assemblyai_api_key")
@@ -82,13 +96,15 @@ class AssemblyAIProvider(WebSocketSTTProvider):
         if _is_pro(self._model):
             url += f"&end_of_turn_confidence_threshold={_END_OF_TURN_CONFIDENCE_THRESHOLD}"
             url += "&" + urlencode(_PRO_EXTRA_PARAMS)
+        elif _is_agent(self._model):
+            url += "&" + urlencode(_AGENT_MODELS[self._model])
         return url
 
     def _headers(self) -> dict[str, str]:
         return {"Authorization": self._api_key.get_secret_value()}
 
     async def _end_audio(self, ws: Any, tx: Transcription) -> None:
-        if _is_pro(self._model):
+        if _is_pro(self._model) or _is_agent(self._model):
             await self._send_and_wait(ws, json.dumps({"type": "ForceEndpoint"}), tx)
         await ws.send(json.dumps({"type": "Terminate"}))
 

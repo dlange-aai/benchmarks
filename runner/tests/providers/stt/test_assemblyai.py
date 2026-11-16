@@ -167,6 +167,64 @@ async def test_pro_url_uses_api_speech_model_and_voice_agent_config(
     assert "mode=min_latency" in url
 
 
+AGENT_MODEL = "assemblyai-stt-3-7-realtime-agent"
+
+
+@pytest.mark.asyncio
+async def test_realtime_agent_url_is_speech_model_and_manual_mode_only(
+    stt_settings: Settings,
+) -> None:
+    """The agent model sends its id verbatim as speech_model plus mode=manual, nothing else."""
+    cm = fake_connect([{"type": "Turn", "end_of_turn": True, "transcript": "hi"}])
+    provider = AssemblyAIProvider(stt_settings, model=AGENT_MODEL)
+
+    with patch(
+        "coval_bench.providers.stt._streaming.ws_client.connect", return_value=cm
+    ) as mock_connect:
+        await provider.measure_ttft(
+            audio_data=b"\x00" * 640,
+            channels=1,
+            sample_width=2,
+            sample_rate=16000,
+            realtime_resolution=0.01,
+        )
+
+    url = mock_connect.call_args.args[0]
+    assert url == (
+        "wss://streaming.assemblyai.com/v3/ws"
+        f"?sample_rate=16000&speech_model={AGENT_MODEL}&mode=manual"
+    )
+
+
+@pytest.mark.asyncio
+async def test_realtime_agent_force_endpoint_before_terminate(stt_settings: Settings) -> None:
+    """Manual mode never closes a turn itself, so speech-end sends ForceEndpoint first."""
+    sent: list[Any] = []
+    final = {"type": "Turn", "end_of_turn": True, "transcript": "hello world"}
+    cm = fake_connect([final], sent)
+    provider = AssemblyAIProvider(stt_settings, model=AGENT_MODEL)
+
+    with patch("coval_bench.providers.stt._streaming.ws_client.connect", return_value=cm):
+        result = await provider.measure_ttft(
+            audio_data=b"\x00" * 640,
+            channels=1,
+            sample_width=2,
+            sample_rate=16000,
+            realtime_resolution=0.01,
+        )
+
+    text = [m for m in sent if isinstance(m, str)]
+    assert '"ForceEndpoint"' in text[-2]
+    assert '"Terminate"' in text[-1]
+    assert result.complete_transcript == "hello world"
+    assert result.audio_to_final_seconds is not None
+
+
+def test_realtime_agent_provider_name() -> None:
+    p = AssemblyAIProvider(make_settings(), model=AGENT_MODEL)
+    assert p.name == f"assemblyai-{AGENT_MODEL}"
+
+
 @pytest.mark.asyncio
 async def test_universal_streaming_multilingual_url_uses_api_speech_model(
     stt_settings: Settings,
@@ -197,7 +255,16 @@ async def test_universal_streaming_multilingual_url_uses_api_speech_model(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("model", ["bad-model", f"{PRO_MODEL}-x", "universal-pro"])
+@pytest.mark.parametrize(
+    "model",
+    [
+        "bad-model",
+        f"{PRO_MODEL}-x",
+        "universal-pro",
+        "stt-3-7-realtime-agent",
+        "assemblyai-stt-3-8-realtime-agent",
+    ],
+)
 def test_invalid_model_raises(model: str) -> None:
     with pytest.raises(ValueError, match="Invalid AssemblyAI model"):
         AssemblyAIProvider(make_settings(), model=model)
